@@ -1,0 +1,141 @@
+// https://www.shadertoy.com/view/4dX3zl
+
+#pragma kernel LeniaDisplay
+
+RWTexture2D<float4> Destination;
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+
+RWStructuredBuffer<float> _Grid;
+int _Size;
+int _MAX_RAY_STEPS;
+float _thresh;
+
+bool _modSpace;
+bool _enableTrans;
+bool _useColor;
+
+struct Ray {
+    float3 origin;
+    float3 direction;
+};
+
+Ray CreateRay(float3 origin, float3 direction) {
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    return ray;
+}
+
+Ray CreateCameraRay(float2 uv) {
+    float3 origin = mul(_CameraToWorld, float4(0,0,0,1)).xyz;
+    float3 direction = mul(_CameraInverseProjection, float4(uv,0,1)).xyz;
+    direction = mul(_CameraToWorld, float4(direction,0)).xyz;
+    direction = normalize(direction);
+    return CreateRay(origin,direction);
+}
+
+int ToIndex(int3 pos) {
+	return pos.z * _Size *_Size + pos.y *_Size + pos.x;
+}
+
+bool InBounds(int3 pos) {
+	return (pos.x >= 0 && pos.y >= 0 && pos.z >= 0 &&
+			pos.x < _Size && pos.y < _Size && pos.z < _Size);
+}
+
+int pmod(int i, int n) {
+    return (i % n + n) % n;
+}
+
+int3 pmod3(int3 i, int n) {
+    return int3(pmod(i.x, n), pmod(i.y, n), pmod(i.z, n));
+}
+
+[numthreads(8,8,1)]
+void LeniaDisplay (uint3 id : SV_DispatchThreadID)
+{
+    uint width,height;
+    Destination.GetDimensions(width, height);
+
+    float2 uv = id.xy / float2(width,height);
+
+	Ray ray = CreateCameraRay(uv * 2 - 1);
+
+	int3 mapPos = int3(floor(ray.origin + 0.));
+	float3 deltaDist = abs((float3)1.0 / ray.direction);
+	int3 rayStep = int3(sign(ray.direction));
+	float3 sideDist = (sign(ray.direction) * (float3(mapPos) - ray.origin) + (sign(ray.direction) * 0.5) + 0.5) * deltaDist; 
+	bool3 mask = bool3(false, false, false);
+
+	float light = 1.0;
+	for (int i = 0; i < _MAX_RAY_STEPS; i++) {
+
+		// dist before step
+		float d1 = length(float3(mask) * (sideDist - deltaDist));
+
+		// calc next values
+		bool3 b1 = bool3(sideDist.x < sideDist.y, sideDist.y < sideDist.z, sideDist.z < sideDist.x);
+		bool3 b2 = bool3(sideDist.x <= sideDist.z, sideDist.y <= sideDist.x, sideDist.z <= sideDist.y);
+		bool3 newMask = bool3(b1.x && b2.x, b1.y && b2.y, b1.z && b2.z);
+		float3 newSideDist = sideDist + float3(newMask) * deltaDist;
+
+		// dist after step
+		float d2 = length(float3(newMask) * (newSideDist - deltaDist));
+
+		// calc index
+		int index = -1;
+		if (_modSpace) {
+			index = ToIndex(pmod3(mapPos, _Size));
+		} else { // not mod space
+			if (InBounds(mapPos)) {
+				index = ToIndex(mapPos);
+			}
+		}
+
+		// if valid index, calc value
+		if (index != -1) {
+			float v = _Grid[index];
+
+			if (_enableTrans) {
+				v = 1.0 - v;
+				float dist = d2 - d1;
+
+				// light *= pow(v, dist);
+
+				light *= pow(v + (1.0-v)*_thresh, dist);
+
+			} else { // no transparency
+				if (v > _thresh) {
+					if (mask.x) {
+						light = 0.8;
+					}
+					if (mask.y) {
+						light = 0.9;
+					}
+					if (mask.z) {
+						light = 1.0;
+					}
+
+					light = light/max(1.0, d1/10.0);
+					break;
+				}
+			}
+		}
+		
+		// update values
+		mask = newMask;
+		sideDist = newSideDist;
+		mapPos += int3(float3(mask)) * rayStep;
+
+	}
+
+	if (_useColor) {
+		float r = min(max(0, 1.5-abs(1-4*(light-0.5))),1);
+		float g = min(max(0, 1.5-abs(1-4*(light-0.25))),1);
+		float b = min(max(0, 1.5-abs(1-4*light)),1);
+		Destination[id.xy] = float4(r, g, b, 1.0);
+	} else {
+		Destination[id.xy] = float4(light, light, light, 1.0);
+	}
+}

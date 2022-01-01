@@ -1,0 +1,206 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel DAA
+
+RWTexture2D<float4> Destination;
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+
+RWStructuredBuffer<int> _Grid;
+int _Size;
+int _MAX_RAY_STEPS;
+
+
+struct Ray {
+    float3 origin;
+    float3 direction;
+};
+
+Ray CreateRay(float3 origin, float3 direction) {
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    return ray;
+}
+
+Ray CreateCameraRay(float2 uv) {
+    float3 origin = mul(_CameraToWorld, float4(0,0,0,1)).xyz;
+    float3 direction = mul(_CameraInverseProjection, float4(uv,0,1)).xyz;
+    direction = mul(_CameraToWorld, float4(direction,0)).xyz;
+    direction = normalize(direction);
+    return CreateRay(origin,direction);
+}
+
+int ToIndex(int3 pos) {
+	// I think this is right
+	return pos.z * _Size *_Size + pos.y *_Size + pos.x;
+}
+
+bool InBounds(int3 pos) {
+	// I think this is right
+	return (pos.x >= 0 && pos.y >= 0 && pos.z >= 0 &&
+			pos.x < _Size && pos.y < _Size && pos.z < _Size);
+}
+
+int pmod(int i, int n) {
+    return (i % n + n) % n;
+}
+
+int3 pmod3(int3 i, int n) {
+    return int3(pmod(i.x, n), pmod(i.y, n), pmod(i.z, n));
+}
+
+[numthreads(8,8,1)]
+void DAA (uint3 id : SV_DispatchThreadID)
+{
+    uint width,height;
+    Destination.GetDimensions(width, height);
+
+    float2 uv = id.xy / float2(width,height);
+
+	Ray ray = CreateCameraRay(uv * 2 - 1);
+
+	int3 mapPos = int3(floor(ray.origin + 0.));
+	float l = length(ray.direction);
+	float3 deltaDist = abs(float3(l,l,l) / ray.direction);
+	int3 rayStep = int3(sign(ray.direction));
+	float3 sideDist = (sign(ray.direction) * (float3(mapPos) - ray.origin) + (sign(ray.direction) * 0.5) + 0.5) * deltaDist; 
+	bool3 mask;
+
+	int i;
+	for (i = 0; i < _MAX_RAY_STEPS; i++) {
+
+		// if (InBounds(mapPos)) {
+		// 	if (_Grid[ToIndex(mapPos)] > 0) break;
+		// }
+		if (_Grid[ToIndex(pmod3(mapPos, _Size))] > 0) break;
+		
+		bool3 b1 = bool3(sideDist.x < sideDist.y, sideDist.y < sideDist.z, sideDist.z < sideDist.x);
+		bool3 b2 = bool3(sideDist.x <= sideDist.z, sideDist.y <= sideDist.x, sideDist.z <= sideDist.y);
+		mask = bool3(b1.x && b2.x, b1.y && b2.y, b1.z && b2.z);
+		// mask.x = b1.x && b2.x;
+		// mask.y = b1.y && b2.y;
+		// mask.z = b1.z && b2.z;
+
+		sideDist += float3(mask) * deltaDist;
+		mapPos += int3(float3(mask)) * rayStep;
+	}
+	
+	if (i == _MAX_RAY_STEPS) {
+		Destination[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+	} else {
+		float3 color = (float3)0.0;
+		if (mask.x) {
+			color = (float3)0.5;
+		}
+		if (mask.y) {
+			color = (float3)0.75;
+		}
+		if (mask.z) {
+			color = (float3)1.0;
+		}
+
+		// i / max_steps
+		float d = length(float3(mask) * (sideDist - deltaDist)) / length(ray.direction);
+		color = color/max(1.0, d/10.0);
+		Destination[id.xy] = float4(color, 1.0);
+	}
+}
+
+
+
+
+/*
+
+vec2 rotate2d(vec2 v, float a) {
+	float sinA = sin(a);
+	float cosA = cos(a);
+	return vec2(v.x * cosA - v.y * sinA, v.y * cosA + v.x * sinA);	
+}
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+	vec2 screenPos = (fragCoord.xy / iResolution.xy) * 2.0 - 1.0;
+	float3 cameraDir = float3(0.0, 0.0, 0.8);
+	float3 cameraPlaneU = float3(1.0, 0.0, 0.0);
+	float3 cameraPlaneV = float3(0.0, 1.0, 0.0) * iResolution.y / iResolution.x;
+	float3 ray.direction = cameraDir + screenPos.x * cameraPlaneU + screenPos.y * cameraPlaneV;
+	float3 ray.origin = float3(0.0, 2.0 * sin(iTime * 2.7), -12.0);
+		
+	ray.origin.xz = rotate2d(ray.origin.xz, iTime);
+	ray.direction.xz = rotate2d(ray.direction.xz, iTime);
+	
+	int3 mapPos = int3(floor(ray.origin + 0.));
+
+	float3 deltaDist = abs(float3(length(ray.direction)) / ray.direction);
+	
+	int3 rayStep = int3(sign(ray.direction));
+
+	float3 sideDist = (sign(ray.direction) * (float3(mapPos) - ray.origin) + (sign(ray.direction) * 0.5) + 0.5) * deltaDist; 
+	
+	bool3 mask;
+	
+	for (int i = 0; i < MAX_RAY_STEPS; i++) {
+		if (getVoxel(mapPos)) continue;
+		if (USE_BRANCHLESS_DDA) {
+            //Thanks kzy for the suggestion!
+            mask = lessThanEqual(sideDist.xyz, min(sideDist.yzx, sideDist.zxy));
+
+			// wass commented out ---------------
+			bool3 b1 = lessThan(sideDist.xyz, sideDist.yzx);
+			bool3 b2 = lessThanEqual(sideDist.xyz, sideDist.zxy);
+			mask.x = b1.x && b2.x;
+			mask.y = b1.y && b2.y;
+			mask.z = b1.z && b2.z;
+			// --------------------------------------
+
+			//Would've done mask = b1 && b2 but the compiler is making me do it component wise.
+			
+			//All components of mask are false except for the corresponding largest component
+			//of sideDist, which is the axis along which the ray should be incremented.			
+			
+			sideDist += float3(mask) * deltaDist;
+			mapPos += int3(float3(mask)) * rayStep;
+		}
+		else {
+			if (sideDist.x < sideDist.y) {
+				if (sideDist.x < sideDist.z) {
+					sideDist.x += deltaDist.x;
+					mapPos.x += rayStep.x;
+					mask = bool3(true, false, false);
+				}
+				else {
+					sideDist.z += deltaDist.z;
+					mapPos.z += rayStep.z;
+					mask = bool3(false, false, true);
+				}
+			}
+			else {
+				if (sideDist.y < sideDist.z) {
+					sideDist.y += deltaDist.y;
+					mapPos.y += rayStep.y;
+					mask = bool3(false, true, false);
+				}
+				else {
+					sideDist.z += deltaDist.z;
+					mapPos.z += rayStep.z;
+					mask = bool3(false, false, true);
+				}
+			}
+		}
+	}
+	
+	float3 color;
+	if (mask.x) {
+		color = float3(0.5);
+	}
+	if (mask.y) {
+		color = float3(1.0);
+	}
+	if (mask.z) {
+		color = float3(0.75);
+	}
+	fragColor.rgb = color;
+	//fragColor.rgb = float3(0.1 * noiseDeriv);
+}
+
+*/
